@@ -1,0 +1,43 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// android/build.gradle — ARIA Mobile  (project-level)
+//
+// DUAL-MODE (auto-detected by settings.gradle):
+//   gradle.ext.rnEnabled = true   → hybrid build  (pnpm install + EAS)
+//   gradle.ext.rnEnabled = false  → native-only   (Firebase Studio / Android Studio)
+//
+// In native-only mode the RN/Expo classpath entries are skipped because
+// the composite builds that provide their artifact substitutions are not
+// loaded by settings.gradle.
+// ─────────────────────────────────────────────────────────────────────────────
+
+buildscript {
+    ext {
+        buildToolsVersion = "35.0.0"
+        minSdkVersion     = 24
+        compileSdkVersion = 35
+        targetSdkVersion  = 35
+        ndkVersion        = "27.1.12297006"
+        kotlinVersion     = "2.0.21"
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.8.0")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${kotlinVersion}")
+        classpath("org.jetbrains.kotlin:compose-compiler-gradle-plugin:${kotlinVersion}")
+
+        // RN/Expo — only available when composite builds are loaded (hybrid mode).
+        // In native-only mode (Firebase Studio) these lines are skipped entirely.
+        if (gradle.ext.has("rnEnabled") && gradle.ext.rnEnabled) {
+            classpath("com.facebook.react:react-native-gradle-plugin")
+            classpath("expo.modules:expo-module-gradle-plugin")
+        }
+    }
+}
+
+// RN root project plugin — hybrid mode only.
+if (gradle.ext.has("rnEnabled") && gradle.ext.rnEnabled) {
+    apply plugin: "com.facebook.react.rootproject"
+}

@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Network: model download from HuggingFace (one-time, first launch) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Foreground services: model download + screen capture run as foreground -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- Notifications: download progress, training status -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Screen capture: MediaProjection for visual perception -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- Keep CPU awake during model download and training -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Floating chat overlay over other apps (user must grant in Settings → Special app access) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <application
+        android:name=".MainApplication"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="false"
+        android:theme="@style/Theme.ARIAAgent"
+        android:largeHeap="true"
+        tools:targetApi="31">
+
+        <!--
+            OpenCL GPU acceleration — Samsung Exynos / ARM Mali devices.
+            Android 12+ (API 31) requires explicit <uses-native-library> for any
+            non-NDK vendor library; without it the linker silently blocks dlopen().
+
+            Samsung Mali (Exynos 9611 / Mali-G72) stores its OpenCL symbols inside
+            libGLES_mali.so (at /vendor/lib64/egl/), not in libOpenCL.so.
+            libOpenCL.so is often absent or a symlink to libGLES_mali.so.
+
+            android:required="false" → APK installs on all devices; the JNI layer
+            falls back to CPU automatically if neither library loads at runtime.
+        -->
+        <uses-native-library
+            android:name="libGLES_mali.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
+
+        <!--
+            PRIMARY LAUNCHER — Jetpack Compose native UI (Migration Phase 1).
+            ComposeMainActivity is now the app entry point.
+            React Native / Expo have been removed from MainApplication.
+        -->
+        <activity
+            android:name=".ui.ComposeMainActivity"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.ARIAAgent"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Migration stub — kept so the manifest is valid during Phase 1–7.
+            Has no launcher intent filter. Will be DELETED in Phase 8 of migration.md.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:theme="@style/AppTheme" />
+
+        <!-- Model Download Service: foreground service, survives backgrounding -->
+        <service
+            android:name=".core.ai.ModelDownloadService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
+        <!-- Screen Capture Service: MediaProjection requires foreground service -->
+        <service
+            android:name=".system.screen.ScreenCaptureService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
+
+        <!-- Accessibility Service: reads UI tree, dispatches gestures -->
+        <service
+            android:name=".system.accessibility.AgentAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!--
+            Agent Foreground Service.
+            Protects the LLM reasoning loop from Android LMK termination on 6 GB RAM devices.
+            foregroundServiceType="specialUse" is required for services that don't fit a standard
+            category (dataSync/mediaProjection/location).
+
+            Android 14 (API 34) requires PROPERTY_SPECIAL_USE_FGS_SUBTYPE inside <application>
+            when any service declares foregroundServiceType="specialUse".
+        -->
+        <service
+            android:name=".system.AgentForegroundService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false" />
+
+        <!-- Floating Chat Overlay: TYPE_APPLICATION_OVERLAY drawn over any app -->
+        <service
+            android:name=".system.overlay.FloatingChatService"
+            android:exported="false" />
+
+        <property
+            android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+            android:value="ARIA Agent reasoning loop — on-device LLM inference that does not fit dataSync, mediaProjection, or other standard foreground service types." />
+
+    </application>
+</manifest>

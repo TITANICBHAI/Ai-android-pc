@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ARIA Agent</string>
+    <string name="accessibility_service_description">
+        ARIA Agent reads the screen to understand UI elements and dispatches
+        touch gestures to complete tasks on your behalf. All processing is
+        fully on-device. No data leaves your phone.
+    </string>
+</resources>

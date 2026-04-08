@@ -1,0 +1,263 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// app/build.gradle — ARIA Mobile
+//
+// DUAL-MODE (auto-detected by settings.gradle):
+//   rnEnabled = true   → hybrid build  (react plugin + RN/Expo deps)
+//   rnEnabled = false  → native-only   (Firebase Studio / Android Studio)
+//
+// All RN-specific blocks (plugin, react { }, RN deps, sub-project deps) are
+// wrapped in "if (rnEnabled)" so the project syncs cleanly without node_modules.
+// ─────────────────────────────────────────────────────────────────────────────
+
+def rnEnabled = gradle.ext.has("rnEnabled") ? gradle.ext.rnEnabled : false
+
+apply plugin: "com.android.application"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "org.jetbrains.kotlin.plugin.compose"
+
+if (rnEnabled) {
+    apply plugin: "com.facebook.react"
+}
+
+// ── React / Hermes config — hybrid mode only ──────────────────────────────────
+if (rnEnabled) {
+    react {
+        // Locate react-native and @react-native/codegen robustly.
+        // Strategy 1: Node.js resolution (works locally and most CI).
+        // Strategy 2: walk candidate paths (fallback when node not in Gradle's PATH).
+        // rootDir = /workspace/android/  rootDir.parentFile = /workspace/ (monorepo root)
+        // JS project root (Expo/RN) = /workspace/artifacts/mobile/
+
+        def findPkg = { String pkg ->
+            def dir = null
+            try {
+                def proc = ["node", "--print",
+                    "require.resolve('${pkg}/package.json')"
+                ].execute(null, rootDir.parentFile)
+                proc.waitFor()
+                if (proc.exitValue() == 0) {
+                    def resolved = proc.text.trim()
+                    if (resolved) dir = new File(resolved).parentFile
+                }
+            } catch (Exception ignored) {}
+
+            if (dir == null || !dir.exists()) {
+                def base = rootDir.parentFile
+                for (int i = 0; i < 5 && dir == null; i++) {
+                    def candidate = new File(base, "node_modules/${pkg}")
+                    if (candidate.exists()) dir = candidate
+                    base = base.parentFile
+                }
+            }
+            if (dir == null) throw new GradleException("Cannot locate ${pkg}")
+            return dir
+        }
+
+        def rnDir        = findPkg("react-native")
+        def rnCodegenDir = findPkg("@react-native/codegen")
+
+        // file() in app/build.gradle resolves relative to android/app/
+        // ../../artifacts/mobile/ → /workspace/artifacts/mobile/ (Expo JS root)
+        root           = file("../../artifacts/mobile/")
+        jsRootDir      = file("../../artifacts/mobile/")
+        reactNativeDir = rnDir
+        codegenDir     = rnCodegenDir
+        cliFile        = new File(rnDir, "cli.js")
+        hermesCommand  = new File(rnDir, "sdks/hermesc/%OS-BIN%/hermesc").toString()
+    }
+}
+
+// ── Download vulkan.hpp before CMake configure ─────────────────────────────
+// ggml-vulkan.cpp requires vulkan/vulkan.hpp (the Khronos C++ wrapper).
+// The NDK ships vulkan.h (the C API) but not vulkan.hpp.
+// This task fetches it from Khronos GitHub once and caches it in
+// stubs/include/vulkan/ — CMakeLists.txt finds it there first.
+// On network-isolated builds the download is skipped gracefully (Vulkan stays OFF).
+task downloadVulkanHpp {
+    def vkDir = file("src/main/cpp/stubs/include/vulkan")
+    def vkHpp = new File(vkDir, "vulkan.hpp")
+    outputs.file(vkHpp)
+    onlyIf { !vkHpp.exists() }
+    doLast {
+        vkDir.mkdirs()
+        try {
+            def url = new URL(
+                "https://raw.githubusercontent.com/KhronosGroup/Vulkan-Hpp/main/vulkan/vulkan.hpp")
+            url.withInputStream { ins ->
+                new FileOutputStream(vkHpp).withStream { out ->
+                    out << ins
+                }
+            }
+            logger.lifecycle("vulkan.hpp downloaded → ${vkHpp}")
+        } catch (Exception ex) {
+            logger.warn("Could not download vulkan.hpp (${ex.message}) — Vulkan will be disabled in this build")
+            if (vkHpp.exists() && vkHpp.length() == 0L) vkHpp.delete()
+        }
+    }
+}
+
+// Wire the download into every CMake configure / build task so it runs before
+// the NDK build starts.  The task is a no-op when vulkan.hpp already exists.
+afterEvaluate {
+    tasks.configureEach { task ->
+        def n = task.name
+        if (n.startsWith("configureCMake") || n.startsWith("buildCMake") ||
+            n.startsWith("generateJsonModel")) {
+            task.dependsOn downloadVulkanHpp
+        }
+    }
+}
+
+// ── Android config ────────────────────────────────────────────────────────────
+android {
+    ndkVersion        rootProject.ext.ndkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdk        rootProject.ext.compileSdkVersion
+
+    namespace "com.ariaagent.mobile"
+
+    defaultConfig {
+        applicationId "com.ariaagent.mobile"
+        minSdk    rootProject.ext.minSdkVersion
+        targetSdk rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+
+        // ─── NDK / llama.cpp JNI ────────────────────────────────────────────
+        // arm64-v8a only: Exynos 9611 is 64-bit. Halves build time vs universal.
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_PLATFORM=android-26"
+                // -mcpu=cortex-a73: tune instruction scheduling for Exynos 9611 big cores.
+                // Uses ARMv8.0-A instructions only — safe for both A73 (big) and A53 (LITTLE).
+                cppFlags "-std=c++17 -O3 -march=armv8-a -mcpu=cortex-a73 -ffast-math -fno-finite-math-only"
+            }
+        }
+
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    // ─── CMake for llama.cpp NDK build ────────────────────────────────────────
+    externalNativeBuild {
+        cmake {
+            path    "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    buildFeatures {
+        compose true
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+        }
+        release {
+            minifyEnabled true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += ["src/main/kotlin"]
+        }
+    }
+
+    packagingOptions {
+        // llama.cpp ships its own libvulkan stub — exclude to avoid conflict
+        excludes += ["META-INF/versions/**", "lib/arm64-v8a/libvulkan.so"]
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+}
+
+// ── Dependencies ──────────────────────────────────────────────────────────────
+dependencies {
+
+    // ── RN + Expo (hybrid mode only) ─────────────────────────────────────────
+    if (rnEnabled) {
+        implementation("com.facebook.react:react-android")
+        implementation("com.facebook.react:hermes-android")
+
+        // Manually linked React Native + Expo native modules.
+        // autolinkLibrariesFromCommand was removed; every native module is explicit.
+        implementation project(':async-storage')
+        implementation project(':react-native-gesture-handler')
+        implementation project(':react-native-safe-area-context')
+        implementation project(':react-native-screens')
+        implementation project(':react-native-svg')
+        implementation project(':expo-modules-core')
+        implementation project(':expo-blur')
+        implementation project(':expo-constants')
+        implementation project(':expo-font')
+        implementation project(':expo-haptics')
+        implementation project(':expo-image')
+        implementation project(':expo-image-picker')
+        implementation project(':expo-linear-gradient')
+        implementation project(':expo-linking')
+        implementation project(':expo-location')
+        implementation project(':expo-splash-screen')
+        implementation project(':expo-system-ui')
+        implementation project(':expo-web-browser')
+    }
+
+    // ── Pure Kotlin / Jetpack deps (always present) ───────────────────────────
+
+    // Kotlin coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // OkHttp — model download with Range header resume support
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // ML Kit OCR — on-device text recognition
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+
+    // ONNX Runtime — MiniLM-L6-v2 sentence embeddings for experience retrieval
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
+
+    // MediaPipe — object detection for screen analysis
+    implementation("com.google.mediapipe:tasks-vision:0.10.14")
+
+    // DataStore — replaces SharedPreferences for agent config
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    // AppCompat — required by Theme.AppCompat.Light.NoActionBar in styles.xml
+    implementation("androidx.appcompat:appcompat:1.7.0")
+
+    // Material Components — required by Theme.MaterialComponents in styles.xml
+    implementation("com.google.android.material:material:1.12.0")
+
+    // Jetpack Compose
+    implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.activity:activity-compose:1.9.2")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.5")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.5")
+    implementation("androidx.navigation:navigation-compose:2.8.2")
+
+    // Coil — image loading for LabelerScreen screenshot display
+    implementation("io.coil-kt:coil-compose:2.7.0")
+
+    debugImplementation("androidx.compose.ui:ui-tooling")
+}

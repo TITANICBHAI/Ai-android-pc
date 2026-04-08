@@ -1,0 +1,129 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK and export ANDROID_NDK_ROOT
+        run: |
+          sdkmanager "ndk;27.1.12297006" "build-tools;35.0.0"
+          # android-actions/setup-android does NOT automatically export ANDROID_NDK_ROOT
+          # after a sdkmanager install. Set it explicitly so every subsequent step can use it.
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.1.12297006" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> $GITHUB_ENV
+          echo "NDK installed at: $ANDROID_HOME/ndk/27.1.12297006"
+
+      - name: Verify bundled OpenCL headers (Mali-G72 / OpenCL 2.0)
+        run: |
+          # OpenCL 2.0 headers are bundled in the repo at stubs/include/CL/.
+          # DO NOT install opencl-headers from apt — Ubuntu ships 3.0 headers which
+          # would overwrite the 2.0 headers needed for Mali-G72 compatibility.
+          # CMakeLists.txt finds stubs/include/CL/cl.h and sets GGML_OPENCL=ON
+          # without any FetchContent network fetch.
+          if [ ! -f "app/src/main/cpp/stubs/include/CL/cl.h" ]; then
+            echo "ERROR: bundled OpenCL headers missing from stubs/include/CL/cl.h"
+            echo "The repo should contain these headers — check that git checkout included them."
+            exit 1
+          fi
+          echo "Bundled OpenCL 2.0 headers OK ($(ls app/src/main/cpp/stubs/include/CL/ | wc -l) files):"
+          ls app/src/main/cpp/stubs/include/CL/
+
+      - name: Create llama.cpp git stub (suppresses build-info warning)
+        run: |
+          # llama.cpp is included as a source-tree copy, not a git submodule.
+          # llama.cpp/common/CMakeLists.txt checks for PROJECT_SOURCE_DIR/.git
+          # to generate build-info.cpp. Without a .git dir it prints a CMake
+          # WARNING on every configure run. Create a minimal stub to silence it.
+          mkdir -p app/src/main/cpp/llama.cpp/.git
+          touch app/src/main/cpp/llama.cpp/.git/index
+          echo "llama.cpp git stub created (suppresses build-info WARNING)"
+
+      - name: Create local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          echo "ndk.dir=$ANDROID_NDK_ROOT" >> local.properties
+          echo "local.properties written:"
+          cat local.properties
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Cache NDK build outputs
+        uses: actions/cache@v4
+        with:
+          path: app/.cxx
+          key: ndk-${{ runner.os }}-${{ hashFiles('app/src/main/cpp/**') }}
+          restore-keys: |
+            ndk-${{ runner.os }}-
+
+      - name: Clear stale CMake variable cache
+        run: |
+          # CMake caches find_file()/find_program() results in CMakeCache.txt.
+          # If the NDK cache was restored from a prior run with different OpenCL
+          # header paths, the stale NOTFOUND values would skip re-detection.
+          # Deleting only CMakeCache.txt forces a clean variable resolution while
+          # preserving built object files (incremental compilation still works).
+          COUNT=$(find app/.cxx -name CMakeCache.txt 2>/dev/null | wc -l)
+          find app/.cxx -name CMakeCache.txt -delete 2>/dev/null || true
+          echo "Cleared $COUNT stale CMakeCache.txt file(s) from app/.cxx"
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx6g -Dorg.gradle.daemon=false"
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+
+      - name: Verify libllama-jni.so was produced
+        run: |
+          SO_PATH="app/build/intermediates/cxx/Debug/*/obj/arm64-v8a/libllama-jni.so"
+          FOUND=$(ls $SO_PATH 2>/dev/null | head -1)
+          if [ -n "$FOUND" ]; then
+            echo "libllama-jni.so found: $FOUND ($(du -h "$FOUND" | cut -f1))"
+          else
+            echo "WARNING: libllama-jni.so not found in intermediates — checking APK contents"
+            APK="app/build/outputs/apk/debug/app-debug.apk"
+            if [ -f "$APK" ]; then
+              unzip -l "$APK" | grep "\.so" || echo "No .so files found in APK"
+            fi
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: aria-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30

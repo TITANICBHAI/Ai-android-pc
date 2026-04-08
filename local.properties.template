@@ -1,0 +1,10 @@
+## local.properties — copy to local.properties and fill in your SDK path.
+## This file is never committed to git.
+##
+## Common paths:
+##   macOS:   /Users/<you>/Library/Android/sdk
+##   Windows: C\:\\Users\\<you>\\AppData\\Local\\Android\\Sdk
+##   Linux:   /home/<you>/Android/Sdk
+##   Firebase Studio / Cloud Workstation: /home/user/Android/sdk
+##
+sdk.dir=/home/user/Android/sdk

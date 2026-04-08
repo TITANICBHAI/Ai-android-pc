@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Accessibility service configuration for ARIA Agent.
+
+    Event types:
+      - typeWindowStateChanged   → detect app switches, activity transitions, IME open/close
+      - typeWindowContentChanged → detect UI updates within the same window
+      - typeViewFocused          → track focus (editable fields, current element)
+      - typeViewClicked          → detect where the user physically taps on screen
+        (needed so the LLM knows what the user tapped, not just what ARIA tapped)
+
+    Flags:
+      - flagDefault                        → standard operation
+      - flagReportViewIds                  → map nodes to resource-id strings
+      - flagRequestEnhancedWebAccessibility → read WebView DOM nodes
+
+    Note: canRequestFilterKeyEvents / flagRequestFilterKeyEvents intentionally
+    omitted — ARIA does not intercept keystrokes. Including it triggers Play
+    Store policy warnings about keylogger-class capabilities.
+
+    canRetrieveWindowContent=true  required for reading the UI tree.
+    canPerformGestures=true        required for tap/swipe dispatch.
+-->
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_service_description"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewFocused|typeViewClicked"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagRequestEnhancedWebAccessibility"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="100"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true" />

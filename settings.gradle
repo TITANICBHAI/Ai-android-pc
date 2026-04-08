@@ -1,0 +1,190 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// android/settings.gradle — ARIA Mobile
+//
+// DUAL-MODE: Works in TWO configurations:
+//
+//   HYBRID MODE  (node_modules found)
+//     Includes @react-native/gradle-plugin and expo-module-gradle-plugin as
+//     root-level composite builds, then includes every native RN/Expo module
+//     as a Gradle sub-project. Used for EAS / local pnpm builds.
+//
+//   NATIVE-ONLY MODE  (node_modules NOT found — Firebase Studio / Android Studio)
+//     Skips all RN/Expo sub-projects entirely. The project syncs and builds as
+//     pure Kotlin + NDK. gradle.ext.rnEnabled is set to false so that
+//     build.gradle and app/build.gradle omit RN plugins and dependencies.
+//
+// No manual flag is required — mode is detected automatically.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Dependency repositories ───────────────────────────────────────────────────
+// PREFER_PROJECT lets RN/Expo composite builds add their own repos in hybrid
+// mode while still providing google() + mavenCentral() for native-only mode.
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_PROJECT)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+// ── 1. Locate node_modules ────────────────────────────────────────────────────
+def nmDir = null
+
+[
+    new File(settingsDir, "node_modules"),
+    new File(settingsDir, "../node_modules"),
+    new File(settingsDir, "../../node_modules"),
+    new File(settingsDir, "../../../node_modules"),
+].each { def c ->
+    if (nmDir == null && new File(c, "react-native/package.json").exists()) {
+        nmDir = c.canonicalFile
+    }
+}
+
+if (nmDir == null) {
+    try {
+        def proc = ["node", "--print",
+            "require.resolve('react-native/package.json')"
+        ].execute(null, settingsDir.parentFile)
+        proc.waitFor()
+        if (proc.exitValue() == 0) {
+            def res = proc.text.trim()
+            if (res) nmDir = new File(res).parentFile.parentFile.canonicalFile
+        }
+    } catch (Exception ignored) {}
+}
+
+// ── Decide mode ───────────────────────────────────────────────────────────────
+if (nmDir == null) {
+    logger.lifecycle("[ARIA] node_modules not found — NATIVE-ONLY mode (Firebase Studio / Android Studio).")
+    logger.lifecycle("[ARIA] RN/Expo sub-projects and plugins are skipped. Run pnpm install for hybrid mode.")
+    gradle.ext.rnEnabled = false
+} else {
+    logger.info("[ARIA] node_modules: ${nmDir}")
+    gradle.ext.rnEnabled = true
+}
+
+// ── 2-5: RN/Expo — only in hybrid mode ───────────────────────────────────────
+if (gradle.ext.rnEnabled) {
+
+    // ── 2. Include @react-native/gradle-plugin (root-level composite build) ───
+    def rnPluginDir = null
+
+    [
+        new File(settingsDir, "node_modules/@react-native/gradle-plugin"),
+        new File(nmDir, "@react-native/gradle-plugin"),
+    ].each { def c ->
+        if (rnPluginDir == null && c.exists()) rnPluginDir = c.canonicalFile
+    }
+
+    if (rnPluginDir == null) {
+        try {
+            def proc = ["node", "--print",
+                "require.resolve('@react-native/gradle-plugin/package.json')"
+            ].execute(null, settingsDir.parentFile)
+            proc.waitFor()
+            if (proc.exitValue() == 0) {
+                def res = proc.text.trim()
+                if (res) rnPluginDir = new File(res).parentFile.canonicalFile
+            }
+        } catch (Exception ignored) {}
+    }
+
+    if (rnPluginDir != null) {
+        includeBuild(rnPluginDir)
+    } else {
+        logger.warn("[ARIA] @react-native/gradle-plugin not found — build.gradle classpath may fail")
+    }
+
+    // ── 3. Include expo-module-gradle-plugin (composite build) ────────────────
+    def expoPluginDir = null
+
+    def expo_p1 = new File(nmDir, "expo-modules-core/expo-module-gradle-plugin")
+    if (expo_p1.exists()) expoPluginDir = expo_p1.canonicalFile
+
+    if (expoPluginDir == null) {
+        try {
+            def proc = ["node", "--print",
+                "require.resolve('expo-modules-core/package.json')"
+            ].execute(null, settingsDir.parentFile)
+            proc.waitFor()
+            if (proc.exitValue() == 0) {
+                def res = proc.text.trim()
+                if (res) {
+                    def c = new File(new File(res).parentFile, "expo-module-gradle-plugin")
+                    if (c.exists()) expoPluginDir = c.canonicalFile
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    if (expoPluginDir != null) {
+        includeBuild(expoPluginDir)
+    } else {
+        logger.warn("[ARIA] expo-module-gradle-plugin not found — Expo native modules may not build")
+    }
+
+    // ── 4. Generate autolinking.json ──────────────────────────────────────────
+    def autolinkFile = new File(settingsDir, "build/generated/autolinking/autolinking.json")
+    autolinkFile.parentFile.mkdirs()
+    if (!autolinkFile.exists() || autolinkFile.length() < 10) {
+        def androidAbsPath = settingsDir.canonicalPath.replace('\\', '/')
+        autolinkFile.text = """\
+{
+  "reactNativeVersion": "0.81.5",
+  "dependencies": {},
+  "project": {
+    "android": {
+      "sourceDir": "${androidAbsPath}",
+      "appProjectDir": "${androidAbsPath}/app",
+      "packageName": "com.ariaagent.mobile",
+      "applicationId": "com.ariaagent.mobile",
+      "mainActivity": ".MainActivity",
+      "watchManagedDeps": true,
+      "buildGradlePath": "build.gradle",
+      "settingsGradlePath": "settings.gradle",
+      "assetsPath": "app/src/main/assets",
+      "stringsPath": "app/src/main/res/values/strings.xml",
+      "isHermes": true
+    }
+  }
+}
+"""
+        logger.lifecycle("[ARIA] autolinking.json generated (packages registered manually in MainApplication.kt)")
+    }
+
+    // ── 5. Native module sub-projects ─────────────────────────────────────────
+    def includeNativeModule = { String gradleProject, String npmPackage, String subdir = "android" ->
+        def dir = new File(nmDir, "${npmPackage}/${subdir}")
+        if (dir.exists()) {
+            include(gradleProject)
+            project(gradleProject).projectDir = dir
+            logger.info("[ARIA] ${gradleProject} → ${dir}")
+        } else {
+            logger.warn("[ARIA] ${npmPackage}/${subdir} not found — ${gradleProject} skipped")
+        }
+    }
+
+    includeNativeModule(":async-storage",                    "@react-native-async-storage/async-storage")
+    includeNativeModule(":react-native-gesture-handler",     "react-native-gesture-handler")
+    includeNativeModule(":react-native-safe-area-context",   "react-native-safe-area-context")
+    includeNativeModule(":react-native-screens",             "react-native-screens")
+    includeNativeModule(":react-native-svg",                 "react-native-svg")
+    includeNativeModule(":expo-modules-core",                "expo-modules-core")
+    includeNativeModule(":expo-blur",                        "expo-blur")
+    includeNativeModule(":expo-constants",                   "expo-constants")
+    includeNativeModule(":expo-font",                        "expo-font")
+    includeNativeModule(":expo-haptics",                     "expo-haptics")
+    includeNativeModule(":expo-image",                       "expo-image")
+    includeNativeModule(":expo-image-picker",                "expo-image-picker")
+    includeNativeModule(":expo-linear-gradient",             "expo-linear-gradient")
+    includeNativeModule(":expo-linking",                     "expo-linking")
+    includeNativeModule(":expo-location",                    "expo-location")
+    includeNativeModule(":expo-splash-screen",               "expo-splash-screen")
+    includeNativeModule(":expo-system-ui",                   "expo-system-ui")
+    includeNativeModule(":expo-web-browser",                 "expo-web-browser")
+
+} // end hybrid mode
+
+rootProject.name = "mobile"
+include(":app")
